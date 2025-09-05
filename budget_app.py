@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 import asyncio
+import logging
 
 
 @dataclass
@@ -105,11 +106,59 @@ class RealTimeBudgetApp:
         self.bank = bank
         self.parser = parser
         self.manager = manager
+        self._stop_event = asyncio.Event()
+        self.logger = logging.getLogger(__name__)
 
-    async def start(self) -> None:
-        """Begin streaming bank transactions into the budget manager."""
+    async def _stream_bank(self) -> None:
+        """Stream transactions from the bank and add them to the manager."""
         async for txn in self.bank.stream_transactions():
             self.manager.add_transaction(txn)
+            if self._stop_event.is_set():
+                break
+
+    async def _listen_sms(self) -> None:
+        """Listen for SMS messages containing transactions.
+
+        Replace this loop with real SMS integration that receives messages
+        and passes them to :meth:`handle_sms`.
+        """
+        while not self._stop_event.is_set():
+            await asyncio.sleep(3600)
+
+    async def _listen_email(self) -> None:
+        """Listen for emails containing transactions.
+
+        Replace this loop with real email integration that receives messages
+        and passes them to :meth:`handle_email`.
+        """
+        while not self._stop_event.is_set():
+            await asyncio.sleep(3600)
+
+    async def start(self) -> None:
+        """Run bank, SMS, and email listeners concurrently.
+
+        The method restarts listeners if they unexpectedly fail and logs
+        exceptions. Call :meth:`stop` to shut down gracefully.
+        """
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.gather(
+                    self._stream_bank(),
+                    self._listen_sms(),
+                    self._listen_email(),
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self.logger.exception("Background task crashed; restarting...")
+                await asyncio.sleep(1)
+            else:
+                break
+        self.logger.info("RealTimeBudgetApp stopped")
+
+    async def stop(self) -> None:
+        """Signal all listeners to stop."""
+        self._stop_event.set()
 
     def handle_sms(self, message: str) -> None:
         """Process an incoming SMS message for transactions."""
