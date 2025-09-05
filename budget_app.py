@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 import asyncio
+import re
 
 
 @dataclass
@@ -55,20 +56,93 @@ class BankConnector:
 
 class MessageParser:
     """Parses SMS or email messages for transaction data."""
+    _DATE_PATTERNS = [
+        r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}",
+        r"\d{4}[/-]\d{1,2}[/-]\d{1,2}",
+        r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}",
+    ]
 
-    def parse_sms(self, message: str) -> Optional[Transaction]:
-        """Extract transaction info from an SMS message.
+    _AMOUNT_RE = re.compile(
+        r"(?P<sign>-)?(?P<currency>[A-Z]{3}|[$€£₹])?\s?"
+        r"(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"
+        r"\s?(?P<currency_after>[A-Z]{3})?",
+        re.IGNORECASE,
+    )
 
-        Implement regex or ML-based parsing here to pull the date,
-        description, and amount from the message text.
+    def _parse_message(self, message: str) -> Optional[Transaction]:
+        """Common parsing logic for SMS and email bodies.
+
+        The heuristic supports a variety of formats such as:
+            'Acct 1234 debited with INR 1,234.56 at Amazon on 12-05-2023'
+            'You were credited $50.23 from PAYPAL 2023/05/12'
+
+        Messages describing failed or reversed transactions return ``None``.
         """
 
-        return None
+        lower = message.lower()
+        if any(word in lower for word in [
+            "failed",
+            "declined",
+            "reversed",
+            "reversal",
+            "unsuccessful",
+            "cancelled",
+        ]):
+            return None
+
+        amount_match = self._AMOUNT_RE.search(message)
+        if not amount_match:
+            return None
+
+        amount = float(amount_match.group("amount").replace(",", ""))
+        if amount_match.group("sign") == "-":
+            amount = -amount
+
+        debit_words = {
+            "debited",
+            "purchase",
+            "spent",
+            "withdrawn",
+            "payment",
+            "paid",
+            "sent",
+        }
+        credit_words = {
+            "credited",
+            "received",
+            "deposit",
+            "added",
+            "refunded",
+        }
+        if any(w in lower for w in debit_words):
+            amount = -abs(amount)
+        elif any(w in lower for w in credit_words):
+            amount = abs(amount)
+
+        date = "unknown"
+        for pattern in self._DATE_PATTERNS:
+            m = re.search(pattern, message)
+            if m:
+                date = m.group(0)
+                break
+
+        description = "transaction"
+        for key in ("at", "from", "to"):
+            m = re.search(rf"{key}\s+([A-Za-z0-9 &._-]+)", message, re.IGNORECASE)
+            if m:
+                description = re.split(r"\s+on\s+|,|\.|!", m.group(1))[0].strip()
+                break
+
+        return Transaction(date=date, description=description, amount=amount)
+
+    def parse_sms(self, message: str) -> Optional[Transaction]:
+        """Extract transaction info from an SMS message."""
+        return self._parse_message(message)
 
     def parse_email(self, message: str) -> Optional[Transaction]:
         """Extract transaction info from an email message."""
-
-        return None
+        normalized = " ".join(message.split())
+        return self._parse_message(normalized)
 
 
 @dataclass
