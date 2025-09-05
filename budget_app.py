@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import asyncio
 import logging
+import re
+from datetime import datetime
 
 
 @dataclass
@@ -20,6 +22,7 @@ class Transaction:
     date: str
     description: str
     amount: float
+    currency: str = "USD"
     category: Optional[str] = None
 
 
@@ -56,20 +59,82 @@ class BankConnector:
 
 class MessageParser:
     """Parses SMS or email messages for transaction data."""
+    currency_symbols = {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR", "¥": "JPY"}
+    debit_keywords = {"debit", "debited", "withdrawn", "purchase", "spent"}
+    credit_keywords = {"credit", "credited", "deposit", "received"}
+    ignore_keywords = {"failed", "reversed", "reversal"}
+
+    amount_re = re.compile(
+        r"(?P<currency>[A-Z]{3}|[$€£₹¥])\s*(?P<amount>[\d,]+(?:\.\d+)?)",
+        re.IGNORECASE,
+    )
+    date_res = [
+        re.compile(r"\d{1,2}/\d{1,2}/\d{4}"),
+        re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),
+        re.compile(r"\d{1,2}-\d{1,2}-\d{4}"),
+        re.compile(r"\d{1,2} [A-Za-z]{3,9} \d{4}"),
+    ]
+    date_formats = [
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%m-%d-%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+
+    def _normalize_date(self, text: str) -> str:
+        for fmt in self.date_formats:
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return text
+
+    def _extract_date(self, message: str) -> str:
+        for regex in self.date_res:
+            match = regex.search(message)
+            if match:
+                return self._normalize_date(match.group())
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
+    def _parse_amount(self, message: str) -> Optional[tuple[float, str]]:
+        match = self.amount_re.search(message)
+        if not match:
+            return None
+        currency = match.group("currency").upper()
+        currency = self.currency_symbols.get(currency, currency)
+        amount = float(match.group("amount").replace(",", ""))
+        return amount, currency
+
+    def _parse_message(self, message: str) -> Optional[Transaction]:
+        lower_msg = message.lower()
+        if any(key in lower_msg for key in self.ignore_keywords):
+            return None
+
+        amount_data = self._parse_amount(message)
+        if not amount_data:
+            return None
+        amount, currency = amount_data
+
+        sign = 1
+        if any(k in lower_msg for k in self.debit_keywords):
+            sign = -1
+        elif any(k in lower_msg for k in self.credit_keywords):
+            sign = 1
+
+        date = self._extract_date(message)
+        description = message.strip()
+        return Transaction(date=date, description=description, amount=sign * amount, currency=currency)
 
     def parse_sms(self, message: str) -> Optional[Transaction]:
-        """Extract transaction info from an SMS message.
-
-        Implement regex or ML-based parsing here to pull the date,
-        description, and amount from the message text.
-        """
-
-        return None
+        """Extract transaction info from an SMS message."""
+        return self._parse_message(message)
 
     def parse_email(self, message: str) -> Optional[Transaction]:
         """Extract transaction info from an email message."""
-
-        return None
+        return self._parse_message(message)
 
 
 @dataclass
